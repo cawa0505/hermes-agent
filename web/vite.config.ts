@@ -7,8 +7,10 @@ import react, { reactCompilerPreset } from "@vitejs/plugin-react";
  *  code filter matches any PascalCase/use* declaration — effectively every TS
  *  module — which made the babel pass parse the whole codebase. */
 function compilerPreset() {
-  const preset = reactCompilerPreset();
-  preset.rolldown.filter.code = /\/>|<\/|from\s*['"][^'"]*react/;
+  const preset = reactCompilerPreset() as any;
+  if (preset.rolldown?.filter) {
+    preset.rolldown.filter.code = /\/>|<\/|from\s*['"][^'"]*react/;
+  }
   return preset;
 }
 import tailwindcss from "@tailwindcss/vite";
