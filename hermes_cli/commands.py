@@ -234,8 +234,6 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("voice", "Toggle voice mode", "Configuration",
                args_hint="[on|off|tts|status]", subcommands=("on", "off", "tts", "status"),
                desktop="composer-voice"),
-    CommandDef("love", "Mia's sweet whisper chat via local Qwen", "Session",
-               args_hint="<message>", busy_policy="dispatch", gateway_only=True),
     CommandDef("wake", "Toggle the 'Hey Hermes' wake word listener", "Configuration",
                cli_only=True, args_hint="[on|off|status]", subcommands=("on", "off", "status")),
     CommandDef("busy", "Control how messages behave while Hermes is working", "Configuration",
