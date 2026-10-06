@@ -6725,7 +6725,7 @@ def _define_discord_view_classes() -> None:
             for idx, chunk in enumerate(chunks):
                 options = [
                     discord.SelectOption(
-                        label=_truncate_discord_component_text(model_id.split("/")[-1], _DISCORD_SELECT_FIELD_LIMIT),
+                        label=_truncate_discord_component_text(model_id, _DISCORD_SELECT_FIELD_LIMIT),
                         value=_truncate_discord_component_text(model_id, _DISCORD_SELECT_FIELD_LIMIT),
                     )
                     for model_id in chunk

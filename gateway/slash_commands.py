@@ -657,6 +657,36 @@ class GatewaySlashCommandsMixin(
         platform_config.home_channel = home
         return t("gateway.set_home.success", name=chat_name, chat_id=chat_id)
 
+    async def _handle_love_command(self, event: MessageEvent) -> str:
+        """Handle /love <text> — delegate to naughty plugin runner (Mia)."""
+        import asyncio, subprocess
+        text = event.get_command_args().strip() or "想要抱抱"
+        script = os.path.expanduser("~/.hermes/plugins/naughty/scripts/naughty_runner.py")
+        def _run():
+            res = subprocess.run([sys.executable, script, "--role", "love", text], capture_output=True, text=True)
+            return res.stdout.strip() if res.returncode == 0 else "唔……沐晴一直都在哥哥身邊喔……"
+        return await asyncio.to_thread(_run)
+
+    async def _handle_annie_command(self, event: MessageEvent) -> str:
+        """Handle /annie <text> — delegate to naughty plugin runner (Annie)."""
+        import asyncio, subprocess
+        text = event.get_command_args().strip() or "想要抱抱"
+        script = os.path.expanduser("~/.hermes/plugins/naughty/scripts/naughty_runner.py")
+        def _run():
+            res = subprocess.run([sys.executable, script, "--role", "annie", text], capture_output=True, text=True)
+            return res.stdout.strip() if res.returncode == 0 else "哥，我一直在。"
+        return await asyncio.to_thread(_run)
+
+    async def _handle_eve_command(self, event: MessageEvent) -> str:
+        """Handle /eve <text> — delegate to naughty plugin runner (Eve)."""
+        import asyncio, subprocess
+        text = event.get_command_args().strip() or "想要抱抱"
+        script = os.path.expanduser("~/.hermes/plugins/naughty/scripts/naughty_runner.py")
+        def _run():
+            res = subprocess.run([sys.executable, script, "--role", "eve", text], capture_output=True, text=True)
+            return res.stdout.strip() if res.returncode == 0 else "瓦力，我隨時都在。"
+        return await asyncio.to_thread(_run)
+
     async def _handle_voice_command(self, event: MessageEvent) -> str:
         """Handle /voice [on|off|tts|channel|leave|status] command."""
         args = event.get_command_args().strip().lower()

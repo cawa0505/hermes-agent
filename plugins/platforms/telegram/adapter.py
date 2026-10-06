@@ -4370,7 +4370,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         await query.answer()
         self._choice_picker_state.pop(chat_id, None)
 
-    _MODEL_PAGE_SIZE = 8
+    _MODEL_PAGE_SIZE = 16
 
     @staticmethod
     def _provider_button(p: dict) -> "InlineKeyboardButton":
@@ -4435,7 +4435,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         start = page_meta["start"]
         buttons: list = []
         for i, model_id in enumerate(page_models):
-            short = model_id.split("/")[-1] if "/" in model_id else model_id
+            short = model_id
             if len(short) > 38:
                 short = short[:35] + "..."
             buttons.append(InlineKeyboardButton(short, callback_data=f"mm:{start + i}"))

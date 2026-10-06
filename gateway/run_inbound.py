@@ -1024,16 +1024,20 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
             return await getattr(self, f"_hm_cmd_{canonical}")(event, source, _quick_key)
         return False, None
 
-    async def _hm_run_exec_quick_command(self, command: str, exec_cmd: str) -> str:
-        """Run a ``type: exec`` quick command in the gateway process (30 s cap, sanitized env — the
+    async def _hm_run_exec_quick_command(self, command: str, exec_cmd: str, args: str = "") -> str:
+        """Run a ``type: exec`` quick command in the gateway process (120 s cap, sanitized env — the
         gateway process has every API key in os.environ; output is redacted too)."""
         try:
             from tools.environments.local import build_subprocess_env
+            env = build_subprocess_env()
+            if args:
+                env["HERMES_COMMAND_ARGS"] = args
+            full_cmd = f"{exec_cmd} {args}".strip() if args else exec_cmd
             proc = await asyncio.create_subprocess_shell(
-                exec_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                env=build_subprocess_env(),
+                full_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
             output = (stdout or stderr).decode().strip()
             if output:
                 from agent.redact import redact_sensitive_text
@@ -1068,7 +1072,8 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
                 exec_cmd = qcmd.get("command", "")
                 if not exec_cmd:
                     return True, t("gateway.quick_command.no_command", command=command), command
-                return True, await self._hm_run_exec_quick_command(command, exec_cmd), command
+                args = event.get_command_args().strip()
+                return True, await self._hm_run_exec_quick_command(str(command), exec_cmd, args), command
             if qtype != "alias":
                 return True, t("gateway.quick_command.unsupported_type", command=command), command
             new_command = self._hm_expand_alias_quick_command(event, qcmd)
