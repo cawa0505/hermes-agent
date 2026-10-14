@@ -17,9 +17,10 @@ Lanes:
 * ``nix``         — ``nix flake check``: the flake files and the dependency
   manifests.
 * ``e2e``, ``e2e_upgrade``, ``e2e_desktop_core``, ``e2e_desktop_update`` —
-  the end-to-end suites. Each runs on a pull request only when the PR edits
-  that suite or the code the suite exists to guard (``_E2E_LANES``), or
-  carries the ``run-e2e`` label.
+  the end-to-end suites. The classifier still says which suites a diff
+  touches (``_E2E_LANES``, the ``run-e2e`` label), but ci.yaml's ``detect``
+  gate forces these lanes off on pull requests and pushes to main: the E2E
+  suites run only on a release run or a manual dispatch.
 * ``frontend``    — TS typecheck matrix + desktop build.
 * ``site``        — Docusaurus + generated skill docs.
 * ``scan``        — supply-chain scan (Python files, .pth, setup hooks).
@@ -39,6 +40,10 @@ Lanes:
 * ``rust``        — ``cargo test`` for the Tauri bootstrap installer. ``.rs``
   lives under ``apps/``, so without this lane a Rust change matched ``frontend``
   and only the TypeScript matrix ran.
+* ``remote_backends`` — the SSH and Docker terminal backends against a real
+  sshd container and the runner's Docker daemon (remote-backends.yml). Every
+  other test of those backends is mocked, so a change to the backends, the
+  terminal tool, or the real-backend tests runs it on the PR.
 
 ``docker``, ``nix`` and the E2E lanes take most of the larger-runner minutes.
 An ordinary product change does not start them on a pull request. Every push
@@ -184,6 +189,19 @@ _FIXTURE_CONSUMER_LANES = ("python", "rust", "frontend", "desktop_updater")
 _RUST_PATHS = ("apps/bootstrap-installer/src-tauri/",)
 _RUST_FILENAMES = {"Cargo.toml", "Cargo.lock"}
 
+# The real SSH/Docker backend lane: the backends, the terminal tool that drives
+# them, the tests it runs, the sshd it starts, and the runner's env allowlist
+# that carries the sshd/image coordinates into each pytest process.
+_REMOTE_BACKEND_PATHS = (
+    "tools/environments/",
+    "tools/terminal_tool",
+    "tests/tools/test_ssh_environment.py",
+    "tests/tools/test_docker_backend_real.py",
+    "scripts/ci/start_test_sshd.sh",
+    "scripts/ci/test_sshd_container_setup.sh",
+    "scripts/run_tests.sh",
+)
+
 # The slow lanes and the paths that start each one on a pull request. A path
 # belongs here when the lane is the only CI that exercises it for real: the
 # suite itself, its harness, and the product code the suite exists to guard.
@@ -303,6 +321,7 @@ _UPDATE_DEPENDENCIES = (
     "hermes_cli/desktop_build_lock.py",
     "hermes_cli/memory_provider_migration.py",
     "hermes_cli/left_core_migration.py",  # source_build migrates plugins that left core
+    "hermes_cli/web_build_limits.py",  # source_build caps the dashboard Node build
     "hermes_cli/desktop_console.py",
     "hermes_cli/bundled_app.py",
     "hermes_cli/gui_uninstall.py",
@@ -451,6 +470,22 @@ _E2E_LANES: dict[str, tuple[str, ...]] = {
         "hermes_cli/web_routers/status.py",
     ),
 }
+
+
+def _with_package_inits(paths: tuple[str, ...]) -> tuple[str, ...]:
+    """Importing a/b/c.py runs a/__init__.py and a/b/__init__.py first, so a routed module
+    routes the package inits above it. A shared hub's inits run whenever the hub is imported, so
+    they are routed too; only an init that is itself a hub stays out."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    inits = [f"{'/'.join(parts[:i])}/__init__.py"
+             for p in (*paths, *sorted(_SHARED_HUBS)) if p.endswith(".py")
+             for parts in [p.split("/")[:-1]] for i in range(1, len(parts) + 1)]
+    return tuple(dict.fromkeys([*paths, *(i for i in inits if i not in _SHARED_HUBS
+                                          and os.path.isfile(os.path.join(root, i)))]))
+
+
+for _lane in ("e2e_upgrade", "e2e_desktop_update"):
+    _E2E_LANES[_lane] = _with_package_inits(_E2E_LANES[_lane])
 # The upgrade journeys are their own lane; editing one does not start ``e2e``.
 # The update suite shares apps/desktop/e2e/ with the core suite but not its specs.
 _E2E_LANE_EXCLUDES = {
@@ -565,6 +600,7 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
         ),
         "desktop_updater": any(_is_desktop_updater(f) for f in files),
         "rust": any(_is_rust(f) for f in files),
+        "remote_backends": any(f.startswith(_REMOTE_BACKEND_PATHS) for f in files),
         **{lane: run_e2e or on for lane, on in _slow_lanes(files).items()},
     }
     consumers = [c for f in files for c in _SHARED_FIXTURE_CONSUMERS.get(f, ())]
@@ -585,6 +621,7 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
         ret["bootstrap"] = True
         ret["desktop_updater"] = True
         ret["rust"] = True
+        ret["remote_backends"] = True
         ret.update(dict.fromkeys(_slow_lanes([]), True))
     return ret
 
