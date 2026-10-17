@@ -122,6 +122,8 @@ class MattermostAdapter(BasePlatformAdapter):
         self._last_post_status: Optional[int] = None  # POST-only, read by the broken-thread-root fallback
         self._last_post_error: str = ""
         self._dedup = MessageDeduplicator()
+        self._model_picker_state: Dict[str, dict] = {}
+        self._action_server: Any = None
 
     # --- HTTP helpers ---
 
@@ -248,10 +250,12 @@ class MattermostAdapter(BasePlatformAdapter):
         self._ws_task = asyncio.create_task(self._ws_loop())
         self._mark_connected()
         self._wire_plugin_handlers(None)  # plugin-registered native handlers
+        await self._start_action_server()
         return True
 
     async def disconnect(self) -> None:
         self._closing = True
+        await self._stop_action_server()
         await cancel_task(self._ws_task)
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
@@ -477,6 +481,11 @@ class MattermostAdapter(BasePlatformAdapter):
         self._ws = await self._session.ws_connect(ws_url, heartbeat=30.0)
         await self._ws.send_json({"seq": 1, "action": "authentication_challenge", "data": {"token": self._token}})
         logger.info("Mattermost: WebSocket connected and authenticated")
+        # Explicitly set bot online status
+        try:
+            await self._api("PUT", f"users/{self._bot_user_id}/status", {"user_id": self._bot_user_id, "status": "online"})
+        except Exception as e:
+            logger.debug("Failed to set Mattermost online status: %s", e)
 
         async for raw_msg in self._ws:
             if self._closing:
@@ -504,8 +513,20 @@ class MattermostAdapter(BasePlatformAdapter):
                               ).lower() not in {"false", "0", "no"}
         free_channels = _channel_id_set(
             _extra_or_secret(self.config.extra, "free_response_channels", "MATTERMOST_FREE_RESPONSE_CHANNELS", blank_is_unset=False))
-        mention_patterns = [f"@{self._bot_username}", f"@{self._bot_user_id}"]
+        mention_patterns = [f"@{self._bot_username}", f"@{self._bot_user_id}", "@all", "@channel", "@here"]
         has_mention = any(pattern.lower() in message_text.lower() for pattern in mention_patterns)
+
+        # Telegram-style /cmd@botname support in Mattermost (e.g. /model@mia-bot, /status@annie-bot)
+        cmd_at_bot = f"@{self._bot_username}".lower()
+        if not has_mention and message_text.strip().startswith("/"):
+            tokens = message_text.strip().split(None, 1)
+            first_word = tokens[0].lower()
+            if "@" in first_word and first_word.endswith(cmd_at_bot):
+                has_mention = True
+                real_cmd = first_word.split("@")[0]
+                rest = (" " + tokens[1]) if len(tokens) > 1 else ""
+                message_text = f"{real_cmd}{rest}"
+
         if require_mention and channel_id not in free_channels and not has_mention:
             logger.debug("Mattermost: skipping non-DM message without @mention (channel=%s)", channel_id)
             return None
@@ -555,9 +576,12 @@ class MattermostAdapter(BasePlatformAdapter):
             post = json.loads(data.get("post") or "")
         except (json.JSONDecodeError, TypeError):
             return
-        # Ignore own messages, system posts and redeliveries.
+        # Ignore own messages, system posts (excluding bot/webhook posts) and redeliveries.
         sender_id, post_id = post.get("user_id", ""), post.get("id", "")
-        if sender_id == self._bot_user_id or post.get("type") or self._dedup.is_duplicate(post_id):
+        post_type = post.get("type", "")
+        # Mattermost system posts like "system_join_channel", "system_header_change" have type starting with "system_"
+        is_system_post = bool(post_type and post_type.startswith("system_"))
+        if sender_id == self._bot_user_id or is_system_post or self._dedup.is_duplicate(post_id):
             return
         channel_id, is_dm = post.get("channel_id", ""), data.get("channel_type", "O") == "D"
         message_text = post.get("message", "")
@@ -579,15 +603,234 @@ class MattermostAdapter(BasePlatformAdapter):
                             MessageType.DOCUMENT)
         else:
             msg_type = MessageType.TEXT
+        # Determine if sender is a bot from post props / system flags / known bot IDs
+        props = post.get("props") or {}
+        known_bot_uids = {
+            "dztbyg5rxfnffd3u9xfpfr9jnh", "cj71oqkxs3y7upoycm7nb6ybio",
+            "t61monqpai89xf8ft4do4xudrh", "b7ozqtiujtykjpijdrfcdg5syc", "tf89k31s1jn3x8kju5w7dqpboo"
+        }
+        is_bot_sender = bool(props.get("from_webhook") or props.get("bot_id") or post.get("type", "").startswith("custom_bot") or sender_id in known_bot_uids)
         source = self.build_source(
             chat_id=channel_id, chat_type=_CHANNEL_TYPE_MAP.get(data.get("channel_type", "O"), "channel"),
             user_id=sender_id, user_name=data.get("sender_name", "").lstrip("@") or sender_id,
-            thread_id=thread_id, message_id=post_id)
+            thread_id=thread_id, message_id=post_id, is_bot=is_bot_sender)
         from gateway.platforms.base import resolve_channel_prompt
         await self.handle_message(MessageEvent(
             text=message_text, message_type=msg_type, source=source, raw_message=post, message_id=post_id,
             media_urls=media_urls or None, media_types=media_types or None,
             channel_prompt=resolve_channel_prompt(self.config.extra, channel_id, None)))
+
+    # --- Interactive Model Picker & Action Server ---
+
+    async def _start_action_server(self) -> None:
+        """Start a local HTTP server to receive Mattermost interactive button clicks."""
+        try:
+            from aiohttp import web
+            app = web.Application()
+            app.router.add_post("/action", self._handle_button_action)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            # Try to bind to an available port starting from 18880
+            for port in range(18880, 18900):
+                try:
+                    site = web.TCPSite(runner, "0.0.0.0", port)
+                    await site.start()
+                    self._action_server = (runner, port)
+                    logger.info("Mattermost: action server started on port %d", port)
+                    break
+                except OSError:
+                    continue
+        except Exception as e:
+            logger.warning("Mattermost: failed to start action server: %s", e)
+
+    async def _stop_action_server(self) -> None:
+        if self._action_server:
+            runner, _ = self._action_server
+            await runner.cleanup()
+            self._action_server = None
+
+    def _get_action_url(self) -> str:
+        if not self._action_server:
+            return ""
+        _, port = self._action_server
+        # 192.168.112.1 is docker host gateway for Mattermost container
+        return f"http://192.168.112.1:{port}/action"
+
+    async def _handle_button_action(self, request) -> Any:
+        from aiohttp import web
+        try:
+            data = await request.json()
+            context = data.get("context", {})
+            post_id = data.get("post_id", "")
+            action = context.get("action", "")
+            state = self._model_picker_state.get(post_id)
+
+            if action == "cancel":
+                self._model_picker_state.pop(post_id, None)
+                return web.json_response({"update": {"message": "❌ 已取消模型切換選單。"}})
+
+            if not state:
+                return web.json_response({"update": {"message": "⚠️ 此選單已過期或失效。"}})
+
+            providers = state.get("providers", [])
+            on_model_selected = state.get("on_model_selected")
+            chat_id = state.get("chat_id")
+
+            if action == "select_provider":
+                slug = context.get("provider_slug")
+                provider = next((p for p in providers if p.get("slug") == slug), None)
+                if not provider:
+                    return web.json_response({"update": {"message": f"找不到 Provider: {slug}"}})
+                # Build model buttons
+                models = provider.get("models", [])[:15]
+                pname = provider.get("name", slug)
+                actions = []
+                for m in models:
+                    short = m.split("/")[-1] if "/" in m else m
+                    actions.append({
+                        "name": f"🤖 {short[:30]}",
+                        "type": "button",
+                        "integration": {
+                            "url": self._get_action_url(),
+                            "context": {"action": "select_model", "model": m, "provider_slug": slug}
+                        }
+                    })
+                actions.append({
+                    "name": "🔙 返回 Provider 選單",
+                    "type": "button",
+                    "integration": {
+                        "url": self._get_action_url(),
+                        "context": {"action": "back_to_providers"}
+                    }
+                })
+                actions.append({
+                    "name": "❌ 取消",
+                    "type": "button",
+                    "integration": {
+                        "url": self._get_action_url(),
+                        "context": {"action": "cancel"}
+                    }
+                })
+                return web.json_response({
+                    "update": {
+                        "message": f"🌸 **【模型切換】已選擇 Provider: `{pname}`**\n請點選欲切換的模型：",
+                        "props": {
+                            "attachments": [{
+                                "text": f"為當前會話切換 `{pname}` 底下的模型：",
+                                "actions": actions
+                            }]
+                        }
+                    }
+                })
+
+            if action == "back_to_providers":
+                # Re-render providers
+                actions = []
+                for p in providers[:10]:
+                    slug = p.get("slug")
+                    name = p.get("name", slug)
+                    count = p.get("total_models", len(p.get("models", [])))
+                    label = f"{name} ({count})"
+                    actions.append({
+                        "name": label[:30],
+                        "type": "button",
+                        "integration": {
+                            "url": self._get_action_url(),
+                            "context": {"action": "select_provider", "provider_slug": slug}
+                        }
+                    })
+                actions.append({
+                    "name": "❌ 取消",
+                    "type": "button",
+                    "integration": {
+                        "url": self._get_action_url(),
+                        "context": {"action": "cancel"}
+                    }
+                })
+                return web.json_response({
+                    "update": {
+                        "message": f"🌸 **【Hermes 旗艦模型切換選單】**\n目前模型：`{state.get('current_model')}`\n請點選欲選擇的 Provider：",
+                        "props": {
+                            "attachments": [{
+                                "text": "點選 Provider 查看可用模型：",
+                                "actions": actions
+                            }]
+                        }
+                    }
+                })
+
+            if action == "select_model":
+                model_id = context.get("model")
+                provider_slug = context.get("provider_slug")
+                self._model_picker_state.pop(post_id, None)
+                if on_model_selected:
+                    asyncio.create_task(on_model_selected(chat_id, model_id, provider_slug))
+                return web.json_response({
+                    "update": {
+                        "message": f"✅ **模型切換成功！**\n已將當前會話切換至：`{model_id}` (`{provider_slug}`)"
+                    }
+                })
+
+        except Exception as e:
+            logger.error("Mattermost: button action error: %s", e)
+            return web.json_response({"update": {"message": f"⚠️ 處理失敗: {e}"}})
+        return web.json_response({})
+
+    async def send_model_picker(
+        self, chat_id: str, providers: list, current_model: str, current_provider: str, session_key: str,
+        on_model_selected, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+        """Send an interactive Mattermost model picker using Action Buttons."""
+        if not self._get_action_url():
+            return SendResult(success=False, error="Action server not running")
+
+        actions = []
+        for p in providers[:10]:
+            slug = p.get("slug")
+            name = p.get("name", slug)
+            count = p.get("total_models", len(p.get("models", [])))
+            label = f"{name} ({count})"
+            if p.get("is_current"):
+                label = f"✓ {label}"
+            actions.append({
+                "name": label[:30],
+                "type": "button",
+                "integration": {
+                    "url": self._get_action_url(),
+                    "context": {"action": "select_provider", "provider_slug": slug}
+                }
+            })
+        actions.append({
+            "name": "❌ 取消",
+            "type": "button",
+            "integration": {
+                "url": self._get_action_url(),
+                "context": {"action": "cancel"}
+            }
+        })
+
+        payload = {
+            "channel_id": chat_id,
+            "message": f"🌸 **【Hermes 旗艦模型切換選單】**\n目前模型：`{current_model}` (`{current_provider}`)\n請點擊欲選擇的 Provider：",
+            "props": {
+                "attachments": [{
+                    "text": "請選擇 Provider：",
+                    "actions": actions
+                }]
+            }
+        }
+        res = await self._post_preserving_thread(chat_id, payload, metadata or {})
+        post_id = res.get("id")
+        if post_id:
+            self._model_picker_state[post_id] = {
+                "providers": providers,
+                "current_model": current_model,
+                "current_provider": current_provider,
+                "session_key": session_key,
+                "chat_id": chat_id,
+                "on_model_selected": on_model_selected
+            }
+            return SendResult(success=True, message_id=post_id)
+        return SendResult(success=False, error="Failed to post picker")
 
 
 # --- Plugin standalone-send (out-of-process cron delivery via Mattermost REST) ---
@@ -711,7 +954,13 @@ def _apply_yaml_config(yaml_cfg: dict, mattermost_cfg: dict) -> dict | None:
 
 
 
-_is_connected = _env_is_connected("MATTERMOST_TOKEN", "MATTERMOST_URL")
+def _is_connected(config: Any) -> bool:
+    """True when Mattermost is configured via YAML config or env."""
+    import hermes_cli.gateway as gateway_mod
+    extra = getattr(config, "extra", {}) or {}
+    url = extra.get("url") or gateway_mod.get_env_value("MATTERMOST_URL") or os.environ.get("MATTERMOST_URL")
+    token = extra.get("token") or gateway_mod.get_env_value("MATTERMOST_TOKEN") or os.environ.get("MATTERMOST_TOKEN")
+    return bool((url or "").strip() and (token or "").strip())
 
 
 

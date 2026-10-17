@@ -44,6 +44,7 @@ _ALLOW_BOTS_ENV = {
     Platform.FEISHU: "FEISHU_ALLOW_BOTS",
     Platform.TELEGRAM: "TELEGRAM_ALLOW_BOTS",
     Platform.SLACK: "SLACK_ALLOW_BOTS",
+    Platform.MATTERMOST: "MATTERMOST_ALLOW_BOTS",
 }
 
 
@@ -560,7 +561,8 @@ class GatewayAuthorizationMixin:
                 extra = {}
                 with contextlib.suppress(Exception):
                     extra = self._adapter_extra_for_source(source)
-                mode = str(_extra_or_secret(extra, "allow_bots", allow_bots_var, "none")).lower().strip()
+                raw_mode = _extra_or_secret(extra, "allow_bots", allow_bots_var, "") or _auth_env(allow_bots_var) or os.getenv(allow_bots_var, "")
+                mode = str(raw_mode).lower().strip()
                 if mode in {"mentions", "all"}:
                     return True
         return False
