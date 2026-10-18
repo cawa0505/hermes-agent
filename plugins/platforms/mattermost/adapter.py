@@ -530,6 +530,22 @@ class MattermostAdapter(BasePlatformAdapter):
         if require_mention and channel_id not in free_channels and not has_mention:
             logger.debug("Mattermost: skipping non-DM message without @mention (channel=%s)", channel_id)
             return None
+
+        # Free-response channel command guard:
+        # If in a free-response channel and text starts with '/', only accept if it's a known Hermes command.
+        # Unknown slash commands (e.g. Mattermost native /call, plugin slash commands) must be silently dropped
+        # so they never fall through as normal conversation prompts to the LLM.
+        if channel_id in free_channels and not has_mention and message_text.strip().startswith("/"):
+            tokens = message_text.strip().split(None, 1)
+            cmd_candidate = tokens[0].lstrip("/").lower().split("@")[0]
+            try:
+                from hermes_cli.commands import resolve_command
+                cmd_def = resolve_command(cmd_candidate)
+            except Exception:
+                cmd_def = None
+            if not cmd_def:
+                logger.debug("Mattermost: ignoring unknown slash command in free channel %s: /%s", channel_id, cmd_candidate)
+                return None
         if has_mention:  # strip the @mention so the agent sees clean input
             for pattern in mention_patterns:
                 message_text = re.sub(re.escape(pattern), "", message_text, flags=re.IGNORECASE).strip()
@@ -623,11 +639,12 @@ class MattermostAdapter(BasePlatformAdapter):
     # --- Interactive Model Picker & Action Server ---
 
     async def _start_action_server(self) -> None:
-        """Start a local HTTP server to receive Mattermost interactive button clicks."""
+        """Start a local HTTP server to receive Mattermost interactive button clicks and slash commands."""
         try:
             from aiohttp import web
             app = web.Application()
             app.router.add_post("/action", self._handle_button_action)
+            app.router.add_post("/slash", self._handle_slash_command)
             runner = web.AppRunner(app)
             await runner.setup()
             # Try to bind to an available port starting from 18880
@@ -655,6 +672,59 @@ class MattermostAdapter(BasePlatformAdapter):
         _, port = self._action_server
         # 192.168.112.1 is docker host gateway for Mattermost container
         return f"http://192.168.112.1:{port}/action"
+
+    def _get_slash_url(self) -> str:
+        if not self._action_server:
+            return ""
+        _, port = self._action_server
+        return f"http://192.168.112.1:{port}/slash"
+
+    async def _handle_slash_command(self, request) -> Any:
+        """Handle incoming Mattermost Slash Command (e.g. /mia <command>)."""
+        from aiohttp import web
+        try:
+            # Mattermost slash command sends application/x-www-form-urlencoded
+            data = await request.post()
+            channel_id = str(data.get("channel_id") or "")
+            user_id = str(data.get("user_id") or "")
+            user_name = str(data.get("user_name") or user_id)
+            command = str(data.get("command") or "").strip()
+            text = str(data.get("text") or "").strip()
+
+            # e.g. command = "/mia", text = "status" or "reset"
+            raw_cmd_text = f"/{text}" if text else "/help"
+
+            source = self.build_source(
+                chat_id=channel_id,
+                chat_type="channel",
+                user_id=user_id,
+                user_name=user_name,
+                thread_id=None,
+                message_id="",
+                is_bot=False
+            )
+
+            # Route to Hermes handle_message as COMMAND
+            event = MessageEvent(
+                text=raw_cmd_text,
+                message_type=MessageType.COMMAND,
+                source=source,
+                raw_message=dict(data),
+                allow_gateway_control=True
+            )
+
+            asyncio.create_task(self.handle_message(event))
+
+            return web.json_response({
+                "response_type": "ephemeral",
+                "text": f"🌸 Mia 收到指令 `{raw_cmd_text}`，正在為吉米哥處理中..."
+            })
+        except Exception as e:
+            logger.error("Mattermost: slash command error: %s", e)
+            return web.json_response({
+                "response_type": "ephemeral",
+                "text": f"⚠️ 指令處理失敗: {e}"
+            })
 
     async def _handle_button_action(self, request) -> Any:
         from aiohttp import web
@@ -763,11 +833,17 @@ class MattermostAdapter(BasePlatformAdapter):
                 model_id = context.get("model")
                 provider_slug = context.get("provider_slug")
                 self._model_picker_state.pop(post_id, None)
+                reply_text = None
                 if on_model_selected:
-                    asyncio.create_task(on_model_selected(chat_id, model_id, provider_slug))
+                    try:
+                        reply_text = await on_model_selected(chat_id, model_id, provider_slug)
+                    except Exception as exc:
+                        logger.error("Mattermost: on_model_selected failed: %s", exc)
+                        reply_text = f"⚠️ 模型切換失敗: {exc}"
+                msg = reply_text or f"✅ **模型切換成功！**\n已將當前會話切換至：`{model_id}` (`{provider_slug}`)"
                 return web.json_response({
                     "update": {
-                        "message": f"✅ **模型切換成功！**\n已將當前會話切換至：`{model_id}` (`{provider_slug}`)"
+                        "message": msg
                     }
                 })
 
