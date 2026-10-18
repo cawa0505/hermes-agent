@@ -737,7 +737,14 @@ class MattermostAdapter(BasePlatformAdapter):
 
             if action == "cancel":
                 self._model_picker_state.pop(post_id, None)
-                return web.json_response({"update": {"message": "❌ 已取消模型切換選單。"}})
+                return web.json_response({
+                    "update": {
+                        "message": "❌ 已取消模型切換選單。",
+                        "props": {
+                            "attachments": []
+                        }
+                    }
+                })
 
             if not state:
                 return web.json_response({"update": {"message": "⚠️ 此選單已過期或失效。"}})
@@ -832,6 +839,7 @@ class MattermostAdapter(BasePlatformAdapter):
             if action == "select_model":
                 model_id = context.get("model")
                 provider_slug = context.get("provider_slug")
+                session_key = state.get("session_key")
                 self._model_picker_state.pop(post_id, None)
                 reply_text = None
                 if on_model_selected:
@@ -843,7 +851,10 @@ class MattermostAdapter(BasePlatformAdapter):
                 msg = reply_text or f"✅ **模型切換成功！**\n已將當前會話切換至：`{model_id}` (`{provider_slug}`)"
                 return web.json_response({
                     "update": {
-                        "message": msg
+                        "message": msg,
+                        "props": {
+                            "attachments": []
+                        }
                     }
                 })
 
