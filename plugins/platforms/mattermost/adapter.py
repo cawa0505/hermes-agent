@@ -694,9 +694,28 @@ class MattermostAdapter(BasePlatformAdapter):
             # e.g. command = "/mia", text = "status" or "reset"
             raw_cmd_text = f"/{text}" if text else "/help"
 
+            # Resolve chat_type: check if group or channel
+            # Mattermost slash command sends channel_id, channel_name
+            channel_name = str(data.get("channel_name") or "")
+            chat_type = "channel"
+            if channel_name and (channel_name.startswith("__") or len(channel_name) == 40):
+                chat_type = "group"
+            else:
+                # check existing routing
+                try:
+                    import sqlite3
+                    conn = sqlite3.connect(getattr(self, "_state_db_path", "/home/zeng/.hermes/state.db"))
+                    c = conn.cursor()
+                    r = c.execute("SELECT session_key FROM gateway_routing WHERE session_key LIKE ? LIMIT 1;", (f"%:{channel_id}:%",)).fetchone()
+                    if r and ":group:" in r[0]:
+                        chat_type = "group"
+                    conn.close()
+                except Exception:
+                    pass
+
             source = self.build_source(
                 chat_id=channel_id,
-                chat_type="channel",
+                chat_type=chat_type,
                 user_id=user_id,
                 user_name=user_name,
                 thread_id=None,
