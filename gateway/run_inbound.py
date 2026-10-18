@@ -1001,7 +1001,6 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayPluginInjectionMixin)
             return await getattr(self, f"_hm_cmd_{canonical}")(event, source, _quick_key)
         return False, None
 
-<<<<<<< HEAD
     async def _hm_run_exec_quick_command(self, command: str, exec_cmd: str, args: str = "") -> str:
         """Run a ``type: exec`` quick command in the gateway process (120 s cap, sanitized env — the
         gateway process has every API key in os.environ; output is redacted too)."""
@@ -1087,8 +1086,6 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayPluginInjectionMixin)
                 logger.warning("Plugin command dispatch failed: %s", e)
         return False, None, command
 
-=======
->>>>>>> main
     def _hm_bundle_slash_rewrite(
         self, event: MessageEvent, source: SessionSource, _quick_key: str, command: str
     ) -> bool:
