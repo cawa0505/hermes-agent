@@ -123,7 +123,7 @@ class MattermostAdapter(BasePlatformAdapter):
         self._last_post_status: Optional[int] = None  # POST-only, read by the broken-thread-root fallback
         self._last_post_error: str = ""
         self._dedup = MessageDeduplicator()
-        self._model_picker_state: Dict[str, dict] = {}
+        self._model_picker_state: dict[str, dict] = {}
         self._action_server: Any = None
 
     def _is_configured_bot_user(self, user_id: str) -> bool:
@@ -706,7 +706,6 @@ class MattermostAdapter(BasePlatformAdapter):
             channel_id = str(data.get("channel_id") or "")
             user_id = str(data.get("user_id") or "")
             user_name = str(data.get("user_name") or user_id)
-            command = str(data.get("command") or "").strip()
             text = str(data.get("text") or "").strip()
 
             # e.g. command = "/mia", text = "status" or "reset"
@@ -876,7 +875,6 @@ class MattermostAdapter(BasePlatformAdapter):
             if action == "select_model":
                 model_id = context.get("model")
                 provider_slug = context.get("provider_slug")
-                session_key = state.get("session_key")
                 self._model_picker_state.pop(post_id, None)
                 reply_text = None
                 if on_model_selected:
@@ -902,7 +900,7 @@ class MattermostAdapter(BasePlatformAdapter):
 
     async def send_model_picker(
         self, chat_id: str, providers: list, current_model: str, current_provider: str, session_key: str,
-        on_model_selected, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+        on_model_selected, metadata: Optional[dict[str, Any]] = None) -> SendResult:
         """Send an interactive Mattermost model picker using Action Buttons."""
         if not self._get_action_url():
             return SendResult(success=False, error="Action server not running")
