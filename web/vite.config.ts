@@ -7,11 +7,16 @@ import react, { reactCompilerPreset } from "@vitejs/plugin-react";
  *  code filter matches any PascalCase/use* declaration — effectively every TS
  *  module — which made the babel pass parse the whole codebase. */
 function compilerPreset() {
-  const preset = reactCompilerPreset() as any;
-  if (preset.rolldown?.filter) {
-    preset.rolldown.filter.code = /\/>|<\/|from\s*['"][^'"]*react/;
-  }
-  return preset;
+  // Upstream's side: return a copy instead of mutating the preset object,
+  // so repeated calls cannot accumulate a stale filter.
+  const preset = reactCompilerPreset();
+  return {
+    ...preset,
+    rolldown: {
+      ...preset.rolldown,
+      filter: { ...preset.rolldown.filter, code: /\/>|<\/|from\s*['"][^'"]*react/ },
+    },
+  };
 }
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
@@ -86,7 +91,9 @@ export default defineConfig({
   },
   plugins: [
     react(),
-    babel({ presets: [compilerPreset()] }),
+    // Babel resolves the compiler preset's plugin from its cwd; builders run Vite from the
+    // checkout root, where only this workspace's node_modules has it.
+    babel({ cwd: configDir, presets: [compilerPreset()] }),
     tailwindcss(),
     hermesDevToken(),
   ],

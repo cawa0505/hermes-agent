@@ -126,6 +126,16 @@ class MattermostAdapter(BasePlatformAdapter):
         self._model_picker_state: Dict[str, dict] = {}
         self._action_server: Any = None
 
+    def _is_configured_bot_user(self, user_id: str) -> bool:
+        """Whether an inbound Mattermost sender is an explicitly configured peer bot.
+
+        Mattermost's posted WebSocket event contains only a sender ID, not a bot flag.  Keep the
+        classification opt-in: an unknown account stays a human rather than silently changing its
+        authorization or delivery behavior. ``bot_users`` in config.yaml is read by the base
+        ``build_source``; ``MATTERMOST_BOT_USERS`` is its env spelling.
+        """
+        return str(user_id) in _channel_id_set(_get_scoped_secret("MATTERMOST_BOT_USERS", ""))
+
     # --- HTTP helpers ---
 
     def _headers(self) -> dict[str, str]:
@@ -630,7 +640,14 @@ class MattermostAdapter(BasePlatformAdapter):
         source = self.build_source(
             chat_id=channel_id, chat_type=_CHANNEL_TYPE_MAP.get(data.get("channel_type", "O"), "channel"),
             user_id=sender_id, user_name=data.get("sender_name", "").lstrip("@") or sender_id,
-            thread_id=thread_id, message_id=post_id, is_bot=is_bot_sender)
+            thread_id=thread_id, message_id=post_id,
+            # Union of both sides: upstream detects a peer bot from props.from_bot
+            # plus the opt-in bot_users list, while this branch also knows a fixed
+            # set of fleet bot account IDs that Mattermost never flags on the wire.
+            # Dropping either side would silently reclassify those senders as human.
+            is_bot=(is_bot_sender
+                    or str(props.get("from_bot", "")).lower() == "true"
+                    or self._is_configured_bot_user(sender_id)))
         from gateway.platforms.base import resolve_channel_prompt
         await self.handle_message(MessageEvent(
             text=message_text, message_type=msg_type, source=source, raw_message=post, message_id=post_id,
